@@ -6,6 +6,8 @@
 
 #include "data_structures.h"
 
+#define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
+
 /* Dynamic array of fixed-length strings */
 
 void InitStringsDynArray(StringsDynArray *sda)
@@ -139,8 +141,9 @@ bool GetNthBool(BoolsDynArray *sda, int n)
 unsigned long long int GetBoolsDynArrayAsInt(BoolsDynArray *sda)
 {
     unsigned long long int decimal = 0;
-    for (int i = sda->used - 1; i >= 0; i--)
-        decimal += sda->a[i] * pow(2, sda->used - 1 - i);
+    int l = MIN(sda->used - 1, 8 * (int) sizeof(unsigned long long int) - 1);
+    for (int i = l; i >= 0; i--)
+        decimal += sda->a[i] * pow(2, l - i);
     return decimal;
 }
 

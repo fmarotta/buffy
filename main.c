@@ -18,6 +18,7 @@
 #include "bioinfo_data_structures.h"
 
 #define DEBUG false
+#define COMPUTE_K false
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 #define MAX(X, Y) (((X) < (Y)) ? (Y) : (X))
 
@@ -57,16 +58,16 @@ char rev_compl_char(char base)
 {
     switch (base)
     {
-    case 'A':
-        return 'T';
-    case 'C':
-        return 'G';
-    case 'G':
-        return 'C';
-    case 'T':
-        return 'A';
-    default:
-        return 'X';
+        case 'A':
+            return 'T';
+        case 'C':
+            return 'G';
+        case 'G':
+            return 'C';
+        case 'T':
+            return 'A';
+        default:
+            return 'X';
     }
 }
 
@@ -91,6 +92,16 @@ int DNA2int(char base)
             return -1;
     }
     return i;
+}
+
+unsigned long long int String2Code(char *s)
+{
+    unsigned long long int r = 0;
+    for (int i = 0; i < MIN(strlen(s), 10); i++)
+    {
+        r += ((unsigned long long int) s[i]) * ((unsigned long long int) pow(10, i));
+    }
+    return r;
 }
 
 char* read_refseq(FILE *fasta, int n)
@@ -125,6 +136,14 @@ double ComputeDB(double *k, int from, int to, double T, double conc)
     return DB;
 }
 
+double ComputeK(double *k, int from, int to, double T)
+{
+    double K = 0;
+    for (int j = from; j < to; j++)
+        K += 1 / exp(-k[j] / (R * T));
+    return K;
+}
+
 double ComputeDeltaDB(double *kd_xi, int reg_size, struct PWM *p, Seq *seq, double T)
 {
     double kd_xi_tmp[reg_size - p->length + 1];
@@ -143,12 +162,32 @@ double ComputeDeltaDB(double *kd_xi, int reg_size, struct PWM *p, Seq *seq, doub
     return ComputeDB(kd_xi_tmp, 0, reg_size - p->length + 1, T, p->concentration);
 }
 
+double ComputeDeltaK(double *kd_xi, int reg_size, struct PWM *p, Seq *seq, double T)
+{
+    double kd_xi_tmp[reg_size - p->length + 1];
+    for (int j = 0; j < reg_size - p->length + 1; j++)
+        kd_xi_tmp[j] = kd_xi[j];
+    for (int j = 0; j < seq->n_diffs; j++)
+    {
+        int k = GetPosOfNthDiff(seq, j);
+        for (int l = MAX(k - p->length + 1, 0); l <= MIN(reg_size - p->length, k); l++)
+        {
+            kd_xi_tmp[l] = 0;
+            for (int m = 0; m < p->length; m++)
+                kd_xi_tmp[l] += p->matrix[4 * m + DNA2int(GetNthCharOfSeq(seq, l + m))];
+        }
+    }
+    return ComputeK(kd_xi_tmp, 0, reg_size - p->length + 1, T);
+}
+
 int main(int argc, char *argv[])
 {
-    FILE *bed, *fasta, *vcf, *pwm, *out;
+    FILE *bed, *fasta, *vcf, *pwm, *conc, *out_db, *out_k;
     Region *reg;
     PWMList pwmlist;
     struct PWM *p;
+    struct PWM *pnext;
+    Hash TF_conc;
     char *refseq_forward;
     char *refseq_reverse;
     StringsDynArray samples;
@@ -161,6 +200,10 @@ int main(int argc, char *argv[])
     double *kd_xi_reverse;
     Hash DB_forward;
     Hash DB_reverse;
+#if COMPUTE_K
+    Hash K_forward;
+    Hash K_reverse;
+#endif
     double T = 310;
 
     if ((bed = fopen(argv[1], "r")) == NULL)
@@ -183,11 +226,23 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Error: cannot open %s.\n", argv[4]);
         exit(EXIT_FAILURE);
     }
-    if ((out = fopen(argv[5], "w")) == NULL)
+    if ((conc = fopen(argv[5], "r")) == NULL)
     {
         fprintf(stderr, "Error: cannot open %s.\n", argv[5]);
         exit(EXIT_FAILURE);
     }
+    if ((out_db = fopen(argv[6], "w")) == NULL)
+    {
+        fprintf(stderr, "Error: cannot open %s.\n", argv[6]);
+        exit(EXIT_FAILURE);
+    }
+#if COMPUTE_K
+    if ((out_k = fopen(argv[7], "w")) == NULL)
+    {
+        fprintf(stderr, "Error: cannot open %s.\n", argv[7]);
+        exit(EXIT_FAILURE);
+    }
+#endif
 
     // Get number of individuals
     char tmp_iid[STRINGSDYNARRAY_MAX_LENGTH];
@@ -233,10 +288,26 @@ int main(int argc, char *argv[])
     while (fgetc(fasta) != '\n')
         ;
 
+    // Read the concentrations
+    fscanf(conc, "%*s%*s"); // skip the header
+    InitHash(&TF_conc, 500);
+    char tf_id[PWMID_MAX_LENGTH];
+    double tf_score;
+    while (fscanf(conc, "%s%lf", tf_id, &tf_score) == 2)
+        AddToHash(&TF_conc, String2Code(tf_id), tf_score);
     // Read all the PWM
     InitPWMList(&pwmlist, T);
-    while (ReadNextPWM(pwm, &pwmlist)) // TODO good chance to compute some stats about e.g. length of pwms
-        ;
+    while (p = ReadNextPWM(pwm, &pwmlist)) // TODO good chance to compute some stats about e.g. length of pwms
+    {
+        /*
+        if (AlreadyInHash(&TF_conc, String2Code(p->id)))
+        {
+            p->concentration *= GetHash(&TF_conc, String2Code(p->id));
+            AddPWMToList(&pwmlist, p);
+        }
+        */
+        AddPWMToList(&pwmlist, p);
+    }
 
     // Process each regreg
     while ((reg = read_next_region(bed)) != NULL)
@@ -332,14 +403,14 @@ int main(int argc, char *argv[])
         // Compute kd for each pos in the refseq
         p = pwmlist.head;
         n_variants = seq_forward[0].n_variants;
-        if (n_variants >= 8 * (int) sizeof(unsigned long long int))
-        {
-            // We use unsigned long long ints to store the index from
-            // GetBoolsDynArrayAsInt(); if there are too many variants
-            // it will overflow
-            fprintf(stderr, "Warning: %s has more than %d variants; skipping it.\n", reg->name, 8 * (int) sizeof(unsigned long long int) - 1);
-            continue;
-        }
+        // if (n_variants >= 8 * (int) sizeof(unsigned long long int))
+        // {
+        //     // We use unsigned long long ints to store the index from
+        //     // GetBoolsDynArrayAsInt(); if there are too many variants
+        //     // it will overflow
+        //     fprintf(stderr, "Warning: %s has more than %d variants; skipping it.\n", reg->name, 8 * (int) sizeof(unsigned long long int) - 1);
+        //     continue;
+        // }
         while (p != NULL)
         {
 #if DEBUG
@@ -347,6 +418,10 @@ int main(int argc, char *argv[])
 #endif
             InitHash(&DB_forward, (int) MIN(2 * n_samples, pow(2, n_variants)));
             InitHash(&DB_reverse, (int) MIN(2 * n_samples, pow(2, n_variants)));
+#if COMPUTE_K
+            InitHash(&K_forward, (int) MIN(2 * n_samples, pow(2, n_variants)));
+            InitHash(&K_reverse, (int) MIN(2 * n_samples, pow(2, n_variants)));
+#endif
             // Compute the Kd's
             kd_xi_forward = calloc(reg->size - p->length + 1, sizeof(double) * (reg->size - p->length + 1));
             kd_xi_reverse = calloc(reg->size - p->length + 1, sizeof(double));
@@ -375,6 +450,14 @@ int main(int argc, char *argv[])
                             GetBoolsDynArrayAsInt(&seq_forward[i].haplotype),
                             ComputeDeltaDB(kd_xi_forward, reg->size, p, &seq_forward[i], T));
                 }
+#if COMPUTE_K
+                if (!AlreadyInHash(&K_forward, GetBoolsDynArrayAsInt(&seq_forward[i].haplotype)))
+                {
+                    AddToHash(&K_forward,
+                            GetBoolsDynArrayAsInt(&seq_forward[i].haplotype),
+                            ComputeDeltaK(kd_xi_forward, reg->size, p, &seq_forward[i], T));
+                }
+#endif
                 if (!AlreadyInHash(&DB_reverse, GetBoolsDynArrayAsInt(&seq_reverse[i].haplotype)))
                 {
 #if DEBUG
@@ -384,18 +467,38 @@ int main(int argc, char *argv[])
                             GetBoolsDynArrayAsInt(&seq_reverse[i].haplotype),
                             ComputeDeltaDB(kd_xi_reverse, reg->size, p, &seq_reverse[i], T));
                 }
-                fprintf(out, "%s\t%s\t%s@%d\t%.*e\n", reg->name,
+#if COMPUTE_K
+                if (!AlreadyInHash(&K_reverse, GetBoolsDynArrayAsInt(&seq_reverse[i].haplotype)))
+                {
+                    AddToHash(&K_reverse,
+                            GetBoolsDynArrayAsInt(&seq_reverse[i].haplotype),
+                            ComputeDeltaK(kd_xi_reverse, reg->size, p, &seq_reverse[i], T));
+                }
+#endif
+                fprintf(out_db, "%s\t%s\t%s\t%d\t%.*e\n", reg->name,
                         GetNthString(&samples, i / PLOIDY),
                         p->id,
                         i % PLOIDY,
                         DECIMAL_DIG,
                         GetHash(&DB_forward, GetBoolsDynArrayAsInt(&seq_forward[i].haplotype)) + GetHash(&DB_reverse, GetBoolsDynArrayAsInt(&seq_reverse[i].haplotype)));
+#if COMPUTE_K
+                fprintf(out_k, "%s\t%s\t%s\t%d\t%.*e\n", reg->name,
+                        GetNthString(&samples, i / PLOIDY),
+                        p->id,
+                        i % PLOIDY,
+                        DECIMAL_DIG,
+                        GetHash(&K_forward, GetBoolsDynArrayAsInt(&seq_forward[i].haplotype)) + GetHash(&K_reverse, GetBoolsDynArrayAsInt(&seq_reverse[i].haplotype)));
+#endif
             }
 
             free(kd_xi_forward);
             free(kd_xi_reverse);
             FreeHash(&DB_forward);
             FreeHash(&DB_reverse);
+#if COMPUTE_K
+            FreeHash(&K_forward);
+            FreeHash(&K_reverse);
+#endif
             p = p->next;
         }
 
@@ -426,6 +529,9 @@ int main(int argc, char *argv[])
     fclose(fasta);
     fclose(vcf);
     fclose(pwm);
-    fclose(out);
+    fclose(out_db);
+#if COMPUTE_K
+    fclose(out_k);
+#endif
     return 0;
 }
