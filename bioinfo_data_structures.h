@@ -76,9 +76,9 @@ typedef struct {
 
 void InitPWMList(PWMList *list, double T);
 
-void AddPWMToList(PWMList *list, char *id, double *matrix, int l);
+void AddPWMToList(PWMList *list, struct PWM *pwm);
 
-int ReadNextPWM(FILE *pwm, PWMList *list);
+struct PWM* ReadNextPWM(FILE *pwm, PWMList *list);
 
 void FreePWMList(PWMList *list);
 

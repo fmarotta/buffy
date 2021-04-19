@@ -103,34 +103,8 @@ void InitPWMList(PWMList *list, double T)
     list->T = T;
 }
 
-void AddPWMToList(PWMList *list, char *id, double *matrix, int l)
+void AddPWMToList(PWMList *list, struct PWM* pwm)
 {
-    struct PWM *pwm = malloc(sizeof(struct PWM));
-
-    strncpy(pwm->id, id, PWMID_MAX_LENGTH);
-    pwm->matrix = matrix;
-    pwm->length = l;
-    pwm->next = NULL;
-
-    // Here we replace each entry in the matrix with its deltaG
-    // deltaG for base b at position i is given by
-    // log2(P_bi/background_b)) * 300 * R * log(2)
-    for (int i = 0; i < 4 * l; i++)
-        pwm->matrix[i] *= 300 * R * log(2);
-
-    // Here we keep only the max deltaG for each position
-    double k = 0;
-    double max_deltaG;
-    for (int m = 0; m < l; m++)
-    {
-        max_deltaG = pwm->matrix[4 * m];
-        for (int i = 1; i < 4; i++)
-            if (pwm->matrix[4 * m + i] > max_deltaG)
-                max_deltaG = pwm->matrix[4 * m + i];
-        k += max_deltaG;
-    }
-    pwm->concentration = exp(-k / (R * list->T));
-
     if (list->size == 0)
     {
         list->head = pwm;
@@ -144,15 +118,16 @@ void AddPWMToList(PWMList *list, char *id, double *matrix, int l)
     list->size++;
 }
 
-int ReadNextPWM(FILE *pwm, PWMList *list)
+struct PWM* ReadNextPWM(FILE *pwm, PWMList *list)
 {
+    struct PWM *p = malloc(sizeof(struct PWM));
     char id[PWMID_MAX_LENGTH];
     double *matrix = malloc(sizeof(double) * 4);
     int i = 0;
     char ch;
 
     if ((ch = fgetc(pwm)) != '>')
-        return 0;
+        return NULL;
     fscanf(pwm, "%s", id);
     while(fgetc(pwm) != '\n')
         ;
@@ -164,8 +139,31 @@ int ReadNextPWM(FILE *pwm, PWMList *list)
     }
     ungetc(ch, pwm);
 
-    AddPWMToList(list, id, matrix, i);
-    return 1;
+    strncpy(p->id, id, PWMID_MAX_LENGTH);
+    p->matrix = matrix;
+    p->length = i;
+    p->next = NULL;
+ 
+    // Here we replace each entry in the matrix with its deltaG
+    // deltaG for base b at position i is given by
+    // log2(P_bi/background_b)) * 300 * R * log(2)
+    for (int i = 0; i < 4 * p->length; i++)
+        p->matrix[i] *= 300 * R * log(2);
+
+    // Here we keep only the max deltaG for each position
+    double k = 0;
+    double max_deltaG;
+    for (int m = 0; m < p->length; m++)
+    {
+        max_deltaG = p->matrix[4 * m];
+        for (int i = 1; i < 4; i++)
+            if (p->matrix[4 * m + i] > max_deltaG)
+                max_deltaG = p->matrix[4 * m + i];
+        k += max_deltaG;
+    }
+    p->concentration = exp(-k / (R * list->T));
+
+    return p;
 }
 
 void FreePWMList(PWMList *list)
